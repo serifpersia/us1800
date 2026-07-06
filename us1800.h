@@ -4,8 +4,13 @@
 #ifndef __US1800_H
 #define __US1800_H
 
+#include <linux/timer.h>
 #include <linux/usb.h>
+#include <linux/workqueue.h>
+#include <linux/atomic.h>
 #include <sound/core.h>
+#include <sound/initval.h>
+#include <sound/pcm.h>
 
 #define DRIVER_NAME "us1800"
 
@@ -14,8 +19,6 @@
 
 #define EP_PLAYBACK_FEEDBACK 0x81
 #define EP_AUDIO_OUT 0x02
-#define EP_MIDI_IN 0x83
-#define EP_MIDI_OUT 0x04
 #define EP_AUDIO_IN 0x86
 
 #define RT_H2D_CLASS_EP (USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_ENDPOINT)
@@ -56,17 +59,65 @@ enum tascam_register {
 };
 
 #define REG_VAL_ENABLE 0x0101
+
+#define NUM_PLAYBACK_URBS 4
+#define PLAYBACK_URB_PACKETS 8
+#define NUM_FEEDBACK_URBS 4
+#define FEEDBACK_URB_PACKETS 1
+#define FEEDBACK_PACKET_SIZE 3
+
+#define BYTES_PER_SAMPLE 3
+#define NUM_CHANNELS 4
+
+#define PLAYBACK_FRAME_SIZE (NUM_CHANNELS * BYTES_PER_SAMPLE)
+#define MAX_FRAMES_PER_PACKET 13
+
+#define PLL_FILTER_OLD_WEIGHT 3
+#define PLL_FILTER_NEW_WEIGHT 1
+#define PLL_FILTER_DIVISOR (PLL_FILTER_OLD_WEIGHT + PLL_FILTER_NEW_WEIGHT)
+
 #define USB_CTRL_TIMEOUT_MS 1000
 
 struct us1800_card {
 	struct usb_device *dev;
 	struct usb_interface *iface0;
 	struct snd_card *card;
+	struct snd_pcm *pcm;
+
 	u8 *scratch_buf;
+
+	struct snd_pcm_substream *playback_substream;
+
+	struct urb *playback_urbs[NUM_PLAYBACK_URBS];
+	size_t playback_urb_alloc_size;
+	struct urb *feedback_urbs[NUM_FEEDBACK_URBS];
+	size_t feedback_urb_alloc_size;
+
+	struct usb_anchor playback_anchor;
+	struct usb_anchor feedback_anchor;
+
+	spinlock_t lock;
+	atomic_t playback_active;
+	atomic_t active_urbs;
 	int current_rate;
+
+	u64 playback_frames_consumed;
+	snd_pcm_uframes_t driver_playback_pos;
+	u64 last_pb_period_pos;
+
+	u32 phase_accum;
+	u32 freq_q16;
+	bool feedback_synced;
+	unsigned int feedback_urb_skip_count;
+
+	struct work_struct stop_work;
+	struct work_struct stop_pcm_work;
 };
 
-/* Function Prototypes */
-int us1800_configure_device_for_rate(struct us1800_card *us1800, int rate);
+void us1800_free_urbs(struct us1800_card *us1800);
+int us1800_alloc_urbs(struct us1800_card *us1800);
+void us1800_stop_work_handler(struct work_struct *work);
+
+#include "us1800_pcm.h"
 
 #endif /* __US1800_H */
