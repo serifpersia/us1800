@@ -19,6 +19,8 @@
 
 #define EP_PLAYBACK_FEEDBACK 0x81
 #define EP_AUDIO_OUT 0x02
+#define EP_MIDI_IN 0x83
+#define EP_MIDI_OUT 0x04
 #define EP_AUDIO_IN 0x86
 
 #define RT_H2D_CLASS_EP (USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_ENDPOINT)
@@ -65,11 +67,14 @@ enum tascam_register {
 #define NUM_FEEDBACK_URBS 4
 #define FEEDBACK_URB_PACKETS 1
 #define FEEDBACK_PACKET_SIZE 3
+#define NUM_CAPTURE_URBS 8
+#define CAPTURE_PACKET_SIZE 4096
 
 #define BYTES_PER_SAMPLE 3
-#define NUM_CHANNELS 4
+#define PLAYBACK_CHANNELS 4
+#define CAPTURE_CHANNELS 16
 
-#define PLAYBACK_FRAME_SIZE (NUM_CHANNELS * BYTES_PER_SAMPLE)
+#define PLAYBACK_FRAME_SIZE (PLAYBACK_CHANNELS * BYTES_PER_SAMPLE)
 #define MAX_FRAMES_PER_PACKET 13
 
 #define PLL_FILTER_OLD_WEIGHT 3
@@ -87,23 +92,31 @@ struct us1800_card {
 	u8 *scratch_buf;
 
 	struct snd_pcm_substream *playback_substream;
+	struct snd_pcm_substream *capture_substream;
 
 	struct urb *playback_urbs[NUM_PLAYBACK_URBS];
 	size_t playback_urb_alloc_size;
 	struct urb *feedback_urbs[NUM_FEEDBACK_URBS];
 	size_t feedback_urb_alloc_size;
+	struct urb *capture_urbs[NUM_CAPTURE_URBS];
 
 	struct usb_anchor playback_anchor;
 	struct usb_anchor feedback_anchor;
+	struct usb_anchor capture_anchor;
 
 	spinlock_t lock;
 	atomic_t playback_active;
+	atomic_t capture_active;
 	atomic_t active_urbs;
 	int current_rate;
 
 	u64 playback_frames_consumed;
 	snd_pcm_uframes_t driver_playback_pos;
 	u64 last_pb_period_pos;
+
+	u64 capture_frames_processed;
+	snd_pcm_uframes_t driver_capture_pos;
+	u64 last_cap_period_pos;
 
 	u32 phase_accum;
 	u32 freq_q16;

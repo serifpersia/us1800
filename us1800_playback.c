@@ -5,15 +5,15 @@
 
 const struct snd_pcm_hardware us1800_playback_hw = {
 	.info = (SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
-		 SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID |
-		 SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
+	SNDRV_PCM_INFO_BLOCK_TRANSFER | SNDRV_PCM_INFO_MMAP_VALID |
+	SNDRV_PCM_INFO_PAUSE | SNDRV_PCM_INFO_RESUME),
 	.formats = SNDRV_PCM_FMTBIT_S24_3LE,
 	.rates = (SNDRV_PCM_RATE_44100 | SNDRV_PCM_RATE_48000 |
-		  SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000),
+	SNDRV_PCM_RATE_88200 | SNDRV_PCM_RATE_96000),
 	.rate_min = 44100,
 	.rate_max = 96000,
-	.channels_min = NUM_CHANNELS,
-	.channels_max = NUM_CHANNELS,
+	.channels_min = PLAYBACK_CHANNELS,
+	.channels_max = PLAYBACK_CHANNELS,
 	.buffer_bytes_max = 1024 * 1024,
 	.period_bytes_min = 576,
 	.period_bytes_max = 1024 * 1024,
@@ -116,59 +116,59 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 	unsigned long flags;
 
 	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-		spin_lock_irqsave(&us1800->lock, flags);
-		if (atomic_read(&us1800->playback_active)) {
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+			spin_lock_irqsave(&us1800->lock, flags);
+			if (atomic_read(&us1800->playback_active)) {
+				spin_unlock_irqrestore(&us1800->lock, flags);
+				return 0;
+			}
+			atomic_set(&us1800->playback_active, 1);
+			us1800->feedback_synced = false;
 			spin_unlock_irqrestore(&us1800->lock, flags);
-			return 0;
-		}
-		atomic_set(&us1800->playback_active, 1);
-		us1800->feedback_synced = false;
-		spin_unlock_irqrestore(&us1800->lock, flags);
 
-		for (i = 0; i < NUM_FEEDBACK_URBS; i++) {
-			usb_anchor_urb(us1800->feedback_urbs[i], &us1800->feedback_anchor);
-			if (usb_submit_urb(us1800->feedback_urbs[i], GFP_ATOMIC) < 0) {
-				usb_unanchor_urb(us1800->feedback_urbs[i]);
-				ret = -EIO;
-				goto error;
+			for (i = 0; i < NUM_FEEDBACK_URBS; i++) {
+				usb_anchor_urb(us1800->feedback_urbs[i], &us1800->feedback_anchor);
+				if (usb_submit_urb(us1800->feedback_urbs[i], GFP_ATOMIC) < 0) {
+					usb_unanchor_urb(us1800->feedback_urbs[i]);
+					ret = -EIO;
+					goto error;
+				}
+				atomic_inc(&us1800->active_urbs);
 			}
-			atomic_inc(&us1800->active_urbs);
-		}
 
-		for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
-			usb_anchor_urb(us1800->playback_urbs[i], &us1800->playback_anchor);
-			if (usb_submit_urb(us1800->playback_urbs[i], GFP_ATOMIC) < 0) {
-				usb_unanchor_urb(us1800->playback_urbs[i]);
-				ret = -EIO;
-				goto error;
+			for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
+				usb_anchor_urb(us1800->playback_urbs[i], &us1800->playback_anchor);
+				if (usb_submit_urb(us1800->playback_urbs[i], GFP_ATOMIC) < 0) {
+					usb_unanchor_urb(us1800->playback_urbs[i]);
+					ret = -EIO;
+					goto error;
+				}
+				atomic_inc(&us1800->active_urbs);
 			}
-			atomic_inc(&us1800->active_urbs);
-		}
-		break;
+			break;
 
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		atomic_set(&us1800->playback_active, 0);
-		for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
-			if (us1800->playback_urbs[i])
-				usb_unlink_urb(us1800->playback_urbs[i]);
-		}
-		for (i = 0; i < NUM_FEEDBACK_URBS; i++) {
-			if (us1800->feedback_urbs[i])
-				usb_unlink_urb(us1800->feedback_urbs[i]);
-		}
-		break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+			atomic_set(&us1800->playback_active, 0);
+			for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
+				if (us1800->playback_urbs[i])
+					usb_unlink_urb(us1800->playback_urbs[i]);
+			}
+			for (i = 0; i < NUM_FEEDBACK_URBS; i++) {
+				if (us1800->feedback_urbs[i])
+					usb_unlink_urb(us1800->feedback_urbs[i]);
+			}
+			break;
 
-	default:
-		return -EINVAL;
+		default:
+			return -EINVAL;
 	}
 
 	return 0;
 
-error:
+	error:
 	atomic_set(&us1800->playback_active, 0);
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
@@ -187,12 +187,12 @@ void playback_urb_complete(struct urb *urb)
 	bool need_period_elapsed = false;
 
 	if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-	    urb->status == -ESHUTDOWN || !us1800) {
+		urb->status == -ESHUTDOWN || !us1800) {
 		goto exit_clear;
-	}
+		}
 
-	if (!atomic_read(&us1800->playback_active))
-		goto exit_clear;
+		if (!atomic_read(&us1800->playback_active))
+			goto exit_clear;
 
 	substream = us1800->playback_substream;
 	runtime = substream->runtime;
@@ -252,7 +252,7 @@ void playback_urb_complete(struct urb *urb)
 
 	return;
 
-exit_clear:
+	exit_clear:
 	usb_unanchor_urb(urb);
 	atomic_dec(&us1800->active_urbs);
 }
@@ -292,14 +292,14 @@ void feedback_urb_complete(struct urb *urb)
 			target_freq_q16 = (sum_frames_3ms << 16) / 24;
 
 			us1800->freq_q16 = (us1800->freq_q16 * PLL_FILTER_OLD_WEIGHT +
-					    target_freq_q16 * PLL_FILTER_NEW_WEIGHT) / PLL_FILTER_DIVISOR;
+			target_freq_q16 * PLL_FILTER_NEW_WEIGHT) / PLL_FILTER_DIVISOR;
 
 			us1800->feedback_synced = true;
 		}
 	}
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
-resubmit:
+	resubmit:
 	usb_anchor_urb(urb, &us1800->feedback_anchor);
 	if (usb_submit_urb(urb, GFP_ATOMIC) < 0) {
 		usb_unanchor_urb(urb);

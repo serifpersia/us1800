@@ -27,6 +27,7 @@ void us1800_free_urbs(struct us1800_card *us1800)
 
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
 
 	for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
 		if (us1800->playback_urbs[i]) {
@@ -45,6 +46,16 @@ void us1800_free_urbs(struct us1800_card *us1800)
 					 us1800->feedback_urbs[i]->transfer_dma);
 			usb_free_urb(us1800->feedback_urbs[i]);
 			us1800->feedback_urbs[i] = NULL;
+		}
+	}
+
+	for (i = 0; i < NUM_CAPTURE_URBS; i++) {
+		if (us1800->capture_urbs[i]) {
+			usb_free_coherent(us1800->dev, CAPTURE_PACKET_SIZE,
+							  us1800->capture_urbs[i]->transfer_buffer,
+					 us1800->capture_urbs[i]->transfer_dma);
+			usb_free_urb(us1800->capture_urbs[i]);
+			us1800->capture_urbs[i] = NULL;
 		}
 	}
 }
@@ -68,7 +79,7 @@ int us1800_alloc_urbs(struct us1800_card *us1800)
 
 		urb->dev = us1800->dev;
 		urb->pipe = usb_sndisocpipe(us1800->dev, EP_AUDIO_OUT);
-		urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP | URB_FREE_BUFFER;
+		urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
 		urb->interval = 1;
 		urb->complete = playback_urb_complete;
 		urb->context = us1800;
@@ -94,6 +105,24 @@ int us1800_alloc_urbs(struct us1800_card *us1800)
 		urb->complete = feedback_urb_complete;
 	}
 
+	for (i = 0; i < NUM_CAPTURE_URBS; i++) {
+		struct urb *urb = usb_alloc_urb(0, GFP_KERNEL);
+		void *buf;
+
+		if (!urb)
+			return -ENOMEM;
+		us1800->capture_urbs[i] = urb;
+		buf = usb_alloc_coherent(us1800->dev, CAPTURE_PACKET_SIZE,
+								 GFP_KERNEL, &urb->transfer_dma);
+		if (!buf)
+			return -ENOMEM;
+		usb_fill_bulk_urb(urb, us1800->dev,
+						  usb_rcvbulkpipe(us1800->dev, EP_AUDIO_IN),
+						  buf, CAPTURE_PACKET_SIZE,
+					capture_urb_complete, us1800);
+		urb->transfer_flags |= URB_NO_TRANSFER_DMA_MAP;
+	}
+
 	return 0;
 }
 
@@ -103,6 +132,7 @@ void us1800_stop_work_handler(struct work_struct *work)
 
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
 }
 
 static void us1800_card_private_free(struct snd_card *card)
@@ -157,6 +187,7 @@ static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *
 	spin_lock_init(&us1800->lock);
 	init_usb_anchor(&us1800->playback_anchor);
 	init_usb_anchor(&us1800->feedback_anchor);
+	init_usb_anchor(&us1800->capture_anchor);
 
 	INIT_WORK(&us1800->stop_work, us1800_stop_work_handler);
 	INIT_WORK(&us1800->stop_pcm_work, us1800_stop_pcm_work_handler);
@@ -167,13 +198,14 @@ static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *
 			 card->shortname, USB_VID_TASCAM, dev->descriptor.idProduct,
 		  dev_name(&dev->dev));
 
-	/* Allocate PCM Playback Only device */
-	err = snd_pcm_new(card, "US1800 PCM", 0, 1, 0, &us1800->pcm);
+	/* Allocate PCM Playback & Capture device */
+	err = snd_pcm_new(card, "US1800 PCM", 0, 1, 1, &us1800->pcm);
 	if (err < 0)
 		goto free_card;
 	us1800->pcm->private_data = us1800;
 	strscpy(us1800->pcm->name, "US1800 PCM", sizeof(us1800->pcm->name));
 	snd_pcm_set_ops(us1800->pcm, SNDRV_PCM_STREAM_PLAYBACK, &us1800_playback_ops);
+	snd_pcm_set_ops(us1800->pcm, SNDRV_PCM_STREAM_CAPTURE, &us1800_capture_ops);
 	snd_pcm_set_managed_buffer_all(us1800->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
 
 	us1800->scratch_buf = devm_kzalloc(&dev->dev, 16, GFP_KERNEL);
@@ -250,6 +282,13 @@ static void us1800_disconnect(struct usb_interface *intf)
 
 	if (intf->cur_altsetting->desc.bInterfaceNumber == 0) {
 		dev_info(&us1800->dev->dev, "Removing TASCAM US-1800 from system.\n");
+		atomic_set(&us1800->playback_active, 0);
+		atomic_set(&us1800->capture_active, 0);
+
+		usb_kill_anchored_urbs(&us1800->playback_anchor);
+		usb_kill_anchored_urbs(&us1800->feedback_anchor);
+		usb_kill_anchored_urbs(&us1800->capture_anchor);
+
 		snd_card_disconnect(us1800->card);
 		cancel_work_sync(&us1800->stop_work);
 		cancel_work_sync(&us1800->stop_pcm_work);
