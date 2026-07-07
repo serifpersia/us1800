@@ -20,6 +20,8 @@ static atomic_t dev_idx = ATOMIC_INIT(0);
 
 static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *usb_id);
 static void us1800_disconnect(struct usb_interface *intf);
+static int us1800_suspend(struct usb_interface *intf, pm_message_t message);
+static int us1800_resume(struct usb_interface *intf);
 
 void us1800_free_urbs(struct us1800_card *us1800)
 {
@@ -298,6 +300,52 @@ static void us1800_disconnect(struct usb_interface *intf)
 	}
 }
 
+static int us1800_suspend(struct usb_interface *intf, pm_message_t message)
+{
+	struct us1800_card *us1800 = usb_get_intfdata(intf);
+
+	if (!us1800)
+		return 0;
+
+	snd_pcm_suspend_all(us1800->pcm);
+	cancel_work_sync(&us1800->stop_work);
+	cancel_work_sync(&us1800->stop_pcm_work);
+
+	usb_kill_anchored_urbs(&us1800->playback_anchor);
+	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
+
+	return 0;
+}
+
+static int us1800_resume(struct usb_interface *intf)
+{
+	struct us1800_card *us1800 = usb_get_intfdata(intf);
+	int err;
+	unsigned long flags;
+	int current_rate;
+
+	if (!us1800)
+		return 0;
+
+	err = usb_set_interface(us1800->dev, 0, 1);
+	if (err < 0)
+		return err;
+
+	err = usb_set_interface(us1800->dev, 1, 1);
+	if (err < 0)
+		return err;
+
+	spin_lock_irqsave(&us1800->lock, flags);
+	current_rate = us1800->current_rate;
+	spin_unlock_irqrestore(&us1800->lock, flags);
+
+	if (current_rate > 0)
+		us1800_configure_device_for_rate(us1800, current_rate);
+
+	return 0;
+}
+
 static const struct usb_device_id us1800_usb_ids[] = {
 	{ USB_DEVICE(USB_VID_TASCAM, USB_PID_TASCAM_US1800) },
 	{ }
@@ -308,6 +356,9 @@ static struct usb_driver us1800_alsa_driver = {
 	.name = DRIVER_NAME,
 	.probe = us1800_probe,
 	.disconnect = us1800_disconnect,
+	.suspend = us1800_suspend,
+	.resume = us1800_resume,
+	.reset_resume = us1800_resume,
 	.id_table = us1800_usb_ids,
 };
 
