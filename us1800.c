@@ -307,6 +307,7 @@ static int us1800_suspend(struct usb_interface *intf, pm_message_t message)
 	if (!us1800)
 		return 0;
 
+	dev_info(&us1800->dev->dev, "Suspend triggered. Stopping streams & clearing anchors.\n");
 	snd_pcm_suspend_all(us1800->pcm);
 	cancel_work_sync(&us1800->stop_work);
 	cancel_work_sync(&us1800->stop_pcm_work);
@@ -328,21 +329,31 @@ static int us1800_resume(struct usb_interface *intf)
 	if (!us1800)
 		return 0;
 
+	dev_info(&us1800->dev->dev, "Resume triggered. Re-initializing USB interface settings...\n");
 	err = usb_set_interface(us1800->dev, 0, 1);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&us1800->dev->dev, "Resume: failed to reset interface 0: %d\n", err);
 		return err;
+	}
 
 	err = usb_set_interface(us1800->dev, 1, 1);
-	if (err < 0)
+	if (err < 0) {
+		dev_err(&us1800->dev->dev, "Resume: failed to reset interface 1: %d\n", err);
 		return err;
+	}
 
 	spin_lock_irqsave(&us1800->lock, flags);
 	current_rate = us1800->current_rate;
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
-	if (current_rate > 0)
-		us1800_configure_device_for_rate(us1800, current_rate);
+	if (current_rate > 0) {
+		dev_info(&us1800->dev->dev, "Resume: restoring hardware rate to %d Hz...\n", current_rate);
+		err = us1800_configure_device_for_rate(us1800, current_rate);
+		if (err < 0)
+			dev_err(&us1800->dev->dev, "Resume: rate re-configuration failed: %d\n", err);
+	}
 
+	dev_info(&us1800->dev->dev, "Resume state recovery completed.\n");
 	return 0;
 }
 
