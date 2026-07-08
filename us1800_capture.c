@@ -102,6 +102,12 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 		atomic_set(&us1800->capture_active, 0);
 		stop = true;
+
+		if (!atomic_read(&us1800->playback_active)) {
+			usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
+							VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
+				   MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
+		}
 		break;
 	default:
 		ret = -EINVAL;

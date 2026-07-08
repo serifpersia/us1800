@@ -315,6 +315,10 @@ static int us1800_suspend(struct usb_interface *intf, pm_message_t message)
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
 
+	usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
+					VENDOR_REQ_POWER_CONTROL, RT_H2D_VENDOR_DEV,
+				 MODE_VAL_DEEP_SLEEP, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
+
 	return 0;
 }
 
@@ -327,6 +331,10 @@ static int us1800_resume(struct usb_interface *intf)
 
 	if (!us1800)
 		return 0;
+
+	usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
+					VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
+				 MODE_VAL_WAKE_UP, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
 
 	err = usb_set_interface(us1800->dev, 0, 1);
 	if (err < 0) {

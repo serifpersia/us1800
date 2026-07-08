@@ -38,6 +38,7 @@ enum uac_control_selector {
 };
 
 enum tascam_vendor_request {
+	VENDOR_REQ_POWER_CONTROL = 0x00,
 	VENDOR_REQ_REGISTER_WRITE = 0x41,
 	VENDOR_REQ_MODE_CONTROL = 0x49,
 	VENDOR_REQ_FIRMWARE_READ = 0x56,
@@ -45,8 +46,11 @@ enum tascam_vendor_request {
 
 enum tascam_mode_value {
 	MODE_VAL_HANDSHAKE_READ = 0x0000,
+	MODE_VAL_WAKE_UP = 0x000d,
 	MODE_VAL_CONFIG = 0x0010,
 	MODE_VAL_STREAM_START_US1800 = 0x0032,
+	MODE_VAL_STREAM_STOP_US1800 = 0x0036,
+	MODE_VAL_DEEP_SLEEP = 0x0044,
 };
 
 enum tascam_register {
