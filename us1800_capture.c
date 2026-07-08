@@ -86,32 +86,27 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 
 	spin_lock_irqsave(&us1800->lock, flags);
 	switch (cmd) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-		if (us1800->rate_changing) {
-			ret = -EBUSY;
+		case SNDRV_PCM_TRIGGER_START:
+		case SNDRV_PCM_TRIGGER_RESUME:
+		case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+			if (us1800->rate_changing) {
+				ret = -EBUSY;
+				break;
+			}
+			if (!atomic_read(&us1800->capture_active)) {
+				atomic_set(&us1800->capture_active, 1);
+				start = true;
+			}
 			break;
-		}
-		if (!atomic_read(&us1800->capture_active)) {
-			atomic_set(&us1800->capture_active, 1);
-			start = true;
-		}
-		break;
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
-		atomic_set(&us1800->capture_active, 0);
-		stop = true;
-
-		if (!atomic_read(&us1800->playback_active)) {
-			usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
-							VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
-				   MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
-		}
-		break;
-	default:
-		ret = -EINVAL;
-		break;
+		case SNDRV_PCM_TRIGGER_STOP:
+		case SNDRV_PCM_TRIGGER_SUSPEND:
+		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+			atomic_set(&us1800->capture_active, 0);
+			stop = true;
+			break;
+		default:
+			ret = -EINVAL;
+			break;
 	}
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
@@ -120,6 +115,10 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 		for (i = 0; i < NUM_CAPTURE_URBS; i++) {
 			if (us1800->capture_urbs[i])
 				usb_unlink_urb(us1800->capture_urbs[i]);
+		}
+
+		if (!atomic_read(&us1800->playback_active)) {
+			schedule_work(&us1800->stop_work);
 		}
 	}
 

@@ -135,6 +135,12 @@ void us1800_stop_work_handler(struct work_struct *work)
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
+
+	if (!atomic_read(&us1800->playback_active) && !atomic_read(&us1800->capture_active)) {
+		usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
+						VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
+				  MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
+	}
 }
 
 static void us1800_card_private_free(struct snd_card *card)

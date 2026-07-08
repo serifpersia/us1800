@@ -118,6 +118,7 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 	switch (cmd) {
 		case SNDRV_PCM_TRIGGER_START:
 		case SNDRV_PCM_TRIGGER_RESUME:
+		case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
 			spin_lock_irqsave(&us1800->lock, flags);
 			if (us1800->rate_changing) {
 				spin_unlock_irqrestore(&us1800->lock, flags);
@@ -157,12 +158,6 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 			atomic_set(&us1800->playback_active, 0);
 
-			if (!atomic_read(&us1800->capture_active)) {
-				usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
-								VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
-					MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
-			}
-
 			for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
 				if (us1800->playback_urbs[i])
 					usb_unlink_urb(us1800->playback_urbs[i]);
@@ -170,6 +165,10 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 			for (i = 0; i < NUM_FEEDBACK_URBS; i++) {
 				if (us1800->feedback_urbs[i])
 					usb_unlink_urb(us1800->feedback_urbs[i]);
+			}
+
+			if (!atomic_read(&us1800->capture_active)) {
+				schedule_work(&us1800->stop_work);
 			}
 			break;
 
