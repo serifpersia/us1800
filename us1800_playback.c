@@ -119,6 +119,10 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 		case SNDRV_PCM_TRIGGER_START:
 		case SNDRV_PCM_TRIGGER_RESUME:
 			spin_lock_irqsave(&us1800->lock, flags);
+			if (us1800->rate_changing) {
+				spin_unlock_irqrestore(&us1800->lock, flags);
+				return -EBUSY;
+			}
 			if (atomic_read(&us1800->playback_active)) {
 				spin_unlock_irqrestore(&us1800->lock, flags);
 				return 0;
@@ -186,13 +190,15 @@ void playback_urb_complete(struct urb *urb)
 	unsigned long flags;
 	bool need_period_elapsed = false;
 
-	if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		urb->status == -ESHUTDOWN || !us1800) {
-		goto exit_clear;
-		}
+	if (!us1800)
+		return;
 
-		if (!atomic_read(&us1800->playback_active))
-			goto exit_clear;
+	if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
+		urb->status == -ESHUTDOWN)
+		goto exit_clear;
+
+	if (!atomic_read(&us1800->playback_active))
+		goto exit_clear;
 
 	substream = us1800->playback_substream;
 	runtime = substream->runtime;
@@ -263,7 +269,10 @@ void feedback_urb_complete(struct urb *urb)
 	unsigned long flags;
 	int p;
 
-	if (urb->status || !us1800 || !atomic_read(&us1800->playback_active)) {
+	if (!us1800)
+		return;
+
+	if (urb->status || !atomic_read(&us1800->playback_active)) {
 		usb_unanchor_urb(urb);
 		atomic_dec(&us1800->active_urbs);
 		return;

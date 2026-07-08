@@ -130,29 +130,29 @@ int us1800_pcm_hw_params(struct snd_pcm_substream *substream,
 	if (atomic_read(&us1800->playback_active) ||
 		atomic_read(&us1800->capture_active)) {
 		spin_unlock_irqrestore(&us1800->lock, flags);
-	return -EBUSY;
-		}
-		spin_unlock_irqrestore(&us1800->lock, flags);
+		return -EBUSY;
+	}
 
-		usb_kill_anchored_urbs(&us1800->playback_anchor);
-		usb_kill_anchored_urbs(&us1800->feedback_anchor);
-		usb_kill_anchored_urbs(&us1800->capture_anchor);
+	us1800->rate_changing = true;
+	spin_unlock_irqrestore(&us1800->lock, flags);
 
-		atomic_set(&us1800->active_urbs, 0);
+	usb_kill_anchored_urbs(&us1800->playback_anchor);
+	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
 
-		err = us1800_configure_device_for_rate(us1800, rate);
-		if (err < 0) {
-			spin_lock_irqsave(&us1800->lock, flags);
-			us1800->current_rate = 0;
-			spin_unlock_irqrestore(&us1800->lock, flags);
-			return err;
-		}
+	atomic_set(&us1800->active_urbs, 0);
 
-		spin_lock_irqsave(&us1800->lock, flags);
+	err = us1800_configure_device_for_rate(us1800, rate);
+
+	spin_lock_irqsave(&us1800->lock, flags);
+	us1800->rate_changing = false;
+	if (err < 0)
+		us1800->current_rate = 0;
+	else
 		us1800->current_rate = rate;
-		spin_unlock_irqrestore(&us1800->lock, flags);
+	spin_unlock_irqrestore(&us1800->lock, flags);
 
-		return 0;
+	return err;
 }
 
 void us1800_stop_pcm_work_handler(struct work_struct *work)

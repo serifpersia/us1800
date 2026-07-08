@@ -123,6 +123,8 @@ struct us1800_card {
 	bool feedback_synced;
 	unsigned int feedback_urb_skip_count;
 
+	bool rate_changing;
+
 	struct work_struct stop_work;
 	struct work_struct stop_pcm_work;
 };

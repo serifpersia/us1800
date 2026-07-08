@@ -88,6 +88,10 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 	switch (cmd) {
 	case SNDRV_PCM_TRIGGER_START:
 	case SNDRV_PCM_TRIGGER_RESUME:
+		if (us1800->rate_changing) {
+			ret = -EBUSY;
+			break;
+		}
 		if (!atomic_read(&us1800->capture_active)) {
 			atomic_set(&us1800->capture_active, 1);
 			start = true;
