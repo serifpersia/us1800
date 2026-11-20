@@ -136,13 +136,29 @@ int us1800_pcm_hw_params(struct snd_pcm_substream *substream,
 	us1800->rate_changing = true;
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
+	flush_work(&us1800->stop_work);
+	mutex_lock(&us1800->cfg_mutex);
+
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
 
 	atomic_set(&us1800->active_urbs, 0);
 
-	err = us1800_configure_device_for_rate(us1800, rate);
+	if (atomic_read(&us1800->needs_reinit)) {
+		err = usb_set_interface(us1800->dev, 0, 1);
+		if (!err)
+			err = usb_set_interface(us1800->dev, 1, 1);
+	} else {
+		err = 0;
+	}
+	if (!err)
+		err = us1800_configure_device_for_rate(us1800, rate);
+	if (!err) {
+		us1800->stream_stopped = false;
+		atomic_set(&us1800->needs_reinit, 0);
+	}
+	mutex_unlock(&us1800->cfg_mutex);
 
 	spin_lock_irqsave(&us1800->lock, flags);
 	us1800->rate_changing = false;
@@ -162,8 +178,13 @@ void us1800_stop_pcm_work_handler(struct work_struct *work)
 	if (!us1800->dev)
 		return;
 
+	/*
+	 * snd_pcm_stop() must be called with the stream lock held;
+	 * snd_pcm_stop_xrun() takes it itself and is a no-op if the stream
+	 * isn't running.
+	 */
 	if (us1800->playback_substream)
-		snd_pcm_stop(us1800->playback_substream, SNDRV_PCM_STATE_XRUN);
+		snd_pcm_stop_xrun(us1800->playback_substream);
 	if (us1800->capture_substream)
-		snd_pcm_stop(us1800->capture_substream, SNDRV_PCM_STATE_XRUN);
+		snd_pcm_stop_xrun(us1800->capture_substream);
 }
