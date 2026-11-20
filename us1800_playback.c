@@ -50,6 +50,12 @@ static int us1800_playback_prepare(struct snd_pcm_substream *substream)
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	int i, u;
 	size_t nominal_bytes = (runtime->rate / 8000) * PLAYBACK_FRAME_SIZE;
+	int err;
+
+	/* re-send the start sequence / re-init after STREAM_STOP or breakage */
+	err = us1800_prepare_device(us1800);
+	if (err < 0)
+		return err;
 
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
@@ -60,6 +66,8 @@ static int us1800_playback_prepare(struct snd_pcm_substream *substream)
 	us1800->feedback_synced = false;
 
 	us1800->feedback_urb_skip_count = 4;
+	atomic_set(&us1800->pb_errors, 0);
+	atomic_set(&us1800->fb_errors, 0);
 
 	us1800->phase_accum = 0;
 	us1800->freq_q16 = div_u64(((u64)runtime->rate << 16), 8000);
@@ -157,6 +165,7 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 		case SNDRV_PCM_TRIGGER_SUSPEND:
 		case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
 			atomic_set(&us1800->playback_active, 0);
+			smp_mb();
 
 			for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
 				if (us1800->playback_urbs[i])
@@ -167,9 +176,16 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 					usb_unlink_urb(us1800->feedback_urbs[i]);
 			}
 
-			if (!atomic_read(&us1800->capture_active)) {
+			/*
+			 * Only a real STOP puts the device into stop mode.
+			 * PAUSE_RELEASE does not go through prepare, so sending
+			 * STREAM_STOP on PAUSE_PUSH would leave the device stopped
+			 * when playback resumes. Suspend is handled by the USB
+			 * suspend callback.
+			 */
+			if (cmd == SNDRV_PCM_TRIGGER_STOP &&
+			    !atomic_read(&us1800->capture_active))
 				schedule_work(&us1800->stop_work);
-			}
 			break;
 
 		default:
@@ -192,22 +208,34 @@ void playback_urb_complete(struct urb *urb)
 	struct snd_pcm_runtime *runtime;
 	size_t total_bytes_for_urb = 0;
 	snd_pcm_uframes_t frames_to_copy;
-	int i;
+	int i, err;
 	unsigned long flags;
 	bool need_period_elapsed = false;
 
 	if (!us1800)
 		return;
 
-	if (urb->status == -ENOENT || urb->status == -ECONNRESET ||
-		urb->status == -ESHUTDOWN)
+	if (us1800_urb_fatal(urb->status))
 		goto exit_clear;
 
 	if (!atomic_read(&us1800->playback_active))
 		goto exit_clear;
 
 	substream = us1800->playback_substream;
+	if (!substream || !substream->runtime || !substream->runtime->dma_area)
+		goto exit_clear;
 	runtime = substream->runtime;
+
+	/* Windows: "IsocOut packet error" -> counted, stream broken if persistent */
+	if (urb->status || (urb->number_of_packets &&
+			    urb->error_count >= urb->number_of_packets)) {
+		if (atomic_inc_return(&us1800->pb_errors) > US1800_MAX_CONSEC_ERRORS) {
+			us1800_stream_broken(us1800, "playback iso errors");
+			goto exit_clear;
+		}
+	} else {
+		atomic_set(&us1800->pb_errors, 0);
+	}
 
 	spin_lock_irqsave(&us1800->lock, flags);
 
@@ -258,9 +286,22 @@ void playback_urb_complete(struct urb *urb)
 	if (need_period_elapsed)
 		snd_pcm_period_elapsed(substream);
 
-	usb_anchor_urb(urb, &us1800->playback_anchor);
-	if (usb_submit_urb(urb, GFP_ATOMIC) < 0)
+	if (!atomic_read(&us1800->playback_active))
 		goto exit_clear;
+
+	usb_anchor_urb(urb, &us1800->playback_anchor);
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err < 0) {
+		usb_unanchor_urb(urb);
+		/*
+		 * Previously the URB was dropped silently here: the device then
+		 * stopped receiving audio and looped its internal buffer (the
+		 * "digital noise") while ALSA still believed it was running.
+		 */
+		if (!us1800_urb_fatal(err))
+			us1800_stream_broken(us1800, "playback resubmit failed");
+		goto exit_clear;
+	}
 
 	return;
 
@@ -273,16 +314,27 @@ void feedback_urb_complete(struct urb *urb)
 {
 	struct us1800_card *us1800 = urb->context;
 	unsigned long flags;
-	int p;
+	bool got_valid = false;
+	u32 nominal_q16;
+	int p, err;
 
 	if (!us1800)
 		return;
 
-	if (urb->status || !atomic_read(&us1800->playback_active)) {
+	if (us1800_urb_fatal(urb->status) || !atomic_read(&us1800->playback_active)) {
 		usb_unanchor_urb(urb);
 		atomic_dec(&us1800->active_urbs);
 		return;
 	}
+
+	/*
+	 * Non-fatal errors (-EPROTO, -EILSEQ, -EOVERFLOW, -EXDEV...) happen
+	 * under load. Previously any error dropped the feedback URB for good.
+	 * Now: count them and resubmit, like isocReadCompleteFeedback in the
+	 * Windows driver (stream broken after 40 consecutive errors).
+	 */
+	if (urb->status)
+		goto count_error;
 
 	spin_lock_irqsave(&us1800->lock, flags);
 
@@ -291,6 +343,9 @@ void feedback_urb_complete(struct urb *urb)
 		spin_unlock_irqrestore(&us1800->lock, flags);
 		goto resubmit;
 	}
+
+	nominal_q16 = div_u64(((u64)(us1800->current_rate ? us1800->current_rate : 48000)) << 16,
+			      8000);
 
 	for (p = 0; p < urb->number_of_packets; p++) {
 		if (urb->iso_frame_desc[p].status == 0 && urb->iso_frame_desc[p].actual_length >= 1) {
@@ -306,19 +361,45 @@ void feedback_urb_complete(struct urb *urb)
 
 			target_freq_q16 = (sum_frames_3ms << 16) / 24;
 
+			/*
+			 * Reject garbage feedback (lost sync): more than +-12.5%
+			 * away from nominal can't be a real clock drift and would
+			 * make us over/under-feed the device.
+			 */
+			if (target_freq_q16 < nominal_q16 - (nominal_q16 >> 3) ||
+			    target_freq_q16 > nominal_q16 + (nominal_q16 >> 3))
+				continue;
+
 			us1800->freq_q16 = (us1800->freq_q16 * PLL_FILTER_OLD_WEIGHT +
 			target_freq_q16 * PLL_FILTER_NEW_WEIGHT) / PLL_FILTER_DIVISOR;
 
 			us1800->feedback_synced = true;
+			got_valid = true;
 		}
 	}
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
-	resubmit:
-	usb_anchor_urb(urb, &us1800->feedback_anchor);
-	if (usb_submit_urb(urb, GFP_ATOMIC) < 0) {
+	if (got_valid) {
+		atomic_set(&us1800->fb_errors, 0);
+		goto resubmit;
+	}
+
+count_error:
+	if (atomic_inc_return(&us1800->fb_errors) > US1800_MAX_CONSEC_ERRORS) {
+		us1800_stream_broken(us1800, "feedback lost sync");
 		usb_unanchor_urb(urb);
 		atomic_dec(&us1800->active_urbs);
+		return;
+	}
+
+	resubmit:
+	usb_anchor_urb(urb, &us1800->feedback_anchor);
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err < 0) {
+		usb_unanchor_urb(urb);
+		atomic_dec(&us1800->active_urbs);
+		if (!us1800_urb_fatal(err))
+			us1800_stream_broken(us1800, "feedback resubmit failed");
 	}
 }
 

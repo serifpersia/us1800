@@ -81,7 +81,13 @@ int us1800_alloc_urbs(struct us1800_card *us1800)
 
 		urb->dev = us1800->dev;
 		urb->pipe = usb_sndisocpipe(us1800->dev, EP_AUDIO_OUT);
-		urb->transfer_flags = URB_NO_TRANSFER_DMA_MAP;
+		/*
+		 * ISO_ASAP: if a completion is serviced late (heavy load, e.g.
+		 * a big plugin loading) the resubmit is scheduled at the next
+		 * free frame instead of failing with -EXDEV and silently
+		 * killing the stream.
+		 */
+		urb->transfer_flags = URB_ISO_ASAP | URB_NO_TRANSFER_DMA_MAP;
 		urb->interval = 1;
 		urb->complete = playback_urb_complete;
 		urb->context = us1800;
@@ -132,15 +138,114 @@ void us1800_stop_work_handler(struct work_struct *work)
 {
 	struct us1800_card *us1800 = container_of(work, struct us1800_card, stop_work);
 
+	mutex_lock(&us1800->cfg_mutex);
+
+	/*
+	 * A new stream may have been started between scheduling and running
+	 * this work. Never kill URBs of an active stream and never send
+	 * STREAM_STOP while something is running.
+	 */
+	if (!atomic_read(&us1800->playback_active)) {
+		usb_kill_anchored_urbs(&us1800->playback_anchor);
+		usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	}
+	if (!atomic_read(&us1800->capture_active))
+		usb_kill_anchored_urbs(&us1800->capture_anchor);
+
+	if (!atomic_read(&us1800->playback_active) &&
+	    !atomic_read(&us1800->capture_active) && !us1800->stream_stopped) {
+		usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
+				VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
+				MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0,
+				USB_CTRL_TIMEOUT_MS);
+		/* the next prepare must send the full start sequence again */
+		us1800->stream_stopped = true;
+	}
+
+	mutex_unlock(&us1800->cfg_mutex);
+}
+
+/*
+ * Called from URB completion (atomic) when a stream dies or accumulates
+ * too many errors. Equivalent of PGDevice::irqlOnStreamBroken in the
+ * Windows driver: flag the device for a full re-init and report an XRUN
+ * so the application re-prepares (which performs the re-init).
+ */
+void us1800_stream_broken(struct us1800_card *us1800, const char *why)
+{
+	if (atomic_xchg(&us1800->needs_reinit, 1))
+		return;
+
+	dev_warn_ratelimited(&us1800->dev->dev,
+			     "stream broken (%s), scheduling device re-init\n", why);
+	schedule_work(&us1800->stop_pcm_work);
+}
+
+/*
+ * Sleepable. Called from the PCM prepare callbacks. Mirrors
+ * PGKernelDevice::dispatchHandleStreamBroken -> configureDevice in the
+ * Windows driver: re-select the alternate settings (resets the endpoints
+ * on both sides) and re-run the complete rate/start sequence.
+ */
+int us1800_prepare_device(struct us1800_card *us1800)
+{
+	bool reinit;
+	int rate, err = 0;
+
+	/* make sure a pending STREAM_STOP can't run after we restart */
+	flush_work(&us1800->stop_work);
+
+	mutex_lock(&us1800->cfg_mutex);
+
+	/* the other direction is streaming: the device is fine, leave it */
+	if (atomic_read(&us1800->playback_active) ||
+	    atomic_read(&us1800->capture_active))
+		goto out;
+
+	reinit = atomic_read(&us1800->needs_reinit);
+	if (!reinit && !us1800->stream_stopped)
+		goto out;
+
+	rate = us1800->current_rate ? us1800->current_rate : 48000;
+
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
 
-	if (!atomic_read(&us1800->playback_active) && !atomic_read(&us1800->capture_active)) {
-		usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
-						VENDOR_REQ_MODE_CONTROL, RT_H2D_VENDOR_DEV,
-				  MODE_VAL_STREAM_STOP_US1800, 0x0000, NULL, 0, USB_CTRL_TIMEOUT_MS);
+	if (reinit) {
+		dev_info(&us1800->dev->dev, "re-initialising device after broken stream\n");
+		err = usb_set_interface(us1800->dev, 0, 1);
+		if (!err)
+			err = usb_set_interface(us1800->dev, 1, 1);
+		if (err < 0)
+			goto fail;
 	}
+
+	err = us1800_configure_device_for_rate(us1800, rate);
+	if (err < 0)
+		goto fail;
+
+	us1800->current_rate = rate;
+	us1800->stream_stopped = false;
+	us1800->reinit_failures = 0;
+	atomic_set(&us1800->needs_reinit, 0);
+	atomic_set(&us1800->pb_errors, 0);
+	atomic_set(&us1800->fb_errors, 0);
+	atomic_set(&us1800->cap_errors, 0);
+	goto out;
+
+fail:
+	dev_err(&us1800->dev->dev, "device re-init failed: %d\n", err);
+	atomic_set(&us1800->needs_reinit, 1);
+	if (++us1800->reinit_failures >= US1800_MAX_REINIT_FAILURES) {
+		/* last resort: what "usbreset" does by hand */
+		dev_err(&us1800->dev->dev, "re-init keeps failing, resetting USB device\n");
+		us1800->reinit_failures = 0;
+		usb_queue_reset_device(us1800->iface0);
+	}
+out:
+	mutex_unlock(&us1800->cfg_mutex);
+	return err;
 }
 
 static void us1800_card_private_free(struct snd_card *card)
@@ -193,6 +298,7 @@ static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *
 	us1800->iface0 = intf;
 
 	spin_lock_init(&us1800->lock);
+	mutex_init(&us1800->cfg_mutex);
 	init_usb_anchor(&us1800->playback_anchor);
 	init_usb_anchor(&us1800->feedback_anchor);
 	init_usb_anchor(&us1800->capture_anchor);
@@ -360,10 +466,44 @@ static int us1800_resume(struct usb_interface *intf)
 
 	if (current_rate > 0) {
 		err = us1800_configure_device_for_rate(us1800, current_rate);
-		if (err < 0)
+		if (err < 0) {
 			dev_err(&us1800->dev->dev, "Resume: rate re-configuration failed: %d\n", err);
+			atomic_set(&us1800->needs_reinit, 1);
+		} else {
+			us1800->stream_stopped = false;
+		}
 	}
 
+	return 0;
+}
+
+static int us1800_pre_reset(struct usb_interface *intf)
+{
+	struct us1800_card *us1800 = usb_get_intfdata(intf);
+
+	if (!us1800)
+		return 0;
+
+	snd_pcm_suspend_all(us1800->pcm);
+	cancel_work_sync(&us1800->stop_work);
+	cancel_work_sync(&us1800->stop_pcm_work);
+	mutex_lock(&us1800->cfg_mutex);
+	usb_kill_anchored_urbs(&us1800->playback_anchor);
+	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	return 0;
+}
+
+static int us1800_post_reset(struct usb_interface *intf)
+{
+	struct us1800_card *us1800 = usb_get_intfdata(intf);
+
+	if (!us1800)
+		return 0;
+
+	/* force the full alt-setting + rate sequence on the next prepare */
+	atomic_set(&us1800->needs_reinit, 1);
+	mutex_unlock(&us1800->cfg_mutex);
 	return 0;
 }
 
@@ -380,6 +520,8 @@ static struct usb_driver us1800_alsa_driver = {
 	.suspend = us1800_suspend,
 	.resume = us1800_resume,
 	.reset_resume = us1800_resume,
+	.pre_reset = us1800_pre_reset,
+	.post_reset = us1800_post_reset,
 	.id_table = us1800_usb_ids,
 };
 
