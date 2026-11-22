@@ -53,7 +53,6 @@ static int us1800_capture_prepare(struct snd_pcm_substream *substream)
 	struct us1800_card *us1800 = snd_pcm_substream_chip(substream);
 	int err;
 
-	/* re-send the start sequence / re-init after STREAM_STOP or breakage */
 	err = us1800_prepare_device(us1800);
 	if (err < 0)
 		return err;
@@ -124,7 +123,6 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 				usb_unlink_urb(us1800->capture_urbs[i]);
 		}
 
-		/* see playback trigger: only a real STOP stops the device */
 		if (cmd == SNDRV_PCM_TRIGGER_STOP &&
 		    !atomic_read(&us1800->playback_active))
 			schedule_work(&us1800->stop_work);
@@ -218,12 +216,6 @@ void capture_urb_complete(struct urb *urb)
 		return;
 	}
 
-	/*
-	 * Non-fatal errors (-EPROTO, -EILSEQ, -EOVERFLOW...) used to drop the
-	 * URB for good; after 8 of them capture was dead and the application
-	 * hung waiting for a period. Resubmit and only give up (stream broken
-	 * -> re-init) when the errors persist.
-	 */
 	if (urb->status) {
 		if (atomic_inc_return(&us1800->cap_errors) > US1800_MAX_CONSEC_ERRORS) {
 			us1800_stream_broken(us1800, "capture errors");

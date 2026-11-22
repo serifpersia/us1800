@@ -52,7 +52,6 @@ static int us1800_playback_prepare(struct snd_pcm_substream *substream)
 	size_t nominal_bytes = (runtime->rate / 8000) * PLAYBACK_FRAME_SIZE;
 	int err;
 
-	/* re-send the start sequence / re-init after STREAM_STOP or breakage */
 	err = us1800_prepare_device(us1800);
 	if (err < 0)
 		return err;
@@ -176,13 +175,6 @@ static int us1800_playback_trigger(struct snd_pcm_substream *substream, int cmd)
 					usb_unlink_urb(us1800->feedback_urbs[i]);
 			}
 
-			/*
-			 * Only a real STOP puts the device into stop mode.
-			 * PAUSE_RELEASE does not go through prepare, so sending
-			 * STREAM_STOP on PAUSE_PUSH would leave the device stopped
-			 * when playback resumes. Suspend is handled by the USB
-			 * suspend callback.
-			 */
 			if (cmd == SNDRV_PCM_TRIGGER_STOP &&
 			    !atomic_read(&us1800->capture_active))
 				schedule_work(&us1800->stop_work);
@@ -226,16 +218,15 @@ void playback_urb_complete(struct urb *urb)
 		goto exit_clear;
 	runtime = substream->runtime;
 
-	/* Windows: "IsocOut packet error" -> counted, stream broken if persistent */
 	if (urb->status || (urb->number_of_packets &&
 			    urb->error_count >= urb->number_of_packets)) {
 		if (atomic_inc_return(&us1800->pb_errors) > US1800_MAX_CONSEC_ERRORS) {
 			us1800_stream_broken(us1800, "playback iso errors");
 			goto exit_clear;
 		}
-	} else {
-		atomic_set(&us1800->pb_errors, 0);
+		goto resubmit;
 	}
+	atomic_set(&us1800->pb_errors, 0);
 
 	spin_lock_irqsave(&us1800->lock, flags);
 
@@ -286,6 +277,7 @@ void playback_urb_complete(struct urb *urb)
 	if (need_period_elapsed)
 		snd_pcm_period_elapsed(substream);
 
+resubmit:
 	if (!atomic_read(&us1800->playback_active))
 		goto exit_clear;
 
@@ -293,11 +285,6 @@ void playback_urb_complete(struct urb *urb)
 	err = usb_submit_urb(urb, GFP_ATOMIC);
 	if (err < 0) {
 		usb_unanchor_urb(urb);
-		/*
-		 * Previously the URB was dropped silently here: the device then
-		 * stopped receiving audio and looped its internal buffer (the
-		 * "digital noise") while ALSA still believed it was running.
-		 */
 		if (!us1800_urb_fatal(err))
 			us1800_stream_broken(us1800, "playback resubmit failed");
 		goto exit_clear;
@@ -327,12 +314,6 @@ void feedback_urb_complete(struct urb *urb)
 		return;
 	}
 
-	/*
-	 * Non-fatal errors (-EPROTO, -EILSEQ, -EOVERFLOW, -EXDEV...) happen
-	 * under load. Previously any error dropped the feedback URB for good.
-	 * Now: count them and resubmit, like isocReadCompleteFeedback in the
-	 * Windows driver (stream broken after 40 consecutive errors).
-	 */
 	if (urb->status)
 		goto count_error;
 
@@ -361,11 +342,6 @@ void feedback_urb_complete(struct urb *urb)
 
 			target_freq_q16 = (sum_frames_3ms << 16) / 24;
 
-			/*
-			 * Reject garbage feedback (lost sync): more than +-12.5%
-			 * away from nominal can't be a real clock drift and would
-			 * make us over/under-feed the device.
-			 */
 			if (target_freq_q16 < nominal_q16 - (nominal_q16 >> 3) ||
 			    target_freq_q16 > nominal_q16 + (nominal_q16 >> 3))
 				continue;

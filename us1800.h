@@ -88,12 +88,6 @@ enum tascam_register {
 
 #define USB_CTRL_TIMEOUT_MS 1000
 
-/*
- * Stream-broken detection, modelled on the Windows (Ploytec) driver:
- * it tolerates up to 40 consecutive feedback errors before declaring the
- * stream broken, then stops everything, re-configures the device and
- * restarts (giving up after 10 consecutive failed attempts).
- */
 #define US1800_MAX_CONSEC_ERRORS 40
 #define US1800_MAX_REINIT_FAILURES 3
 
@@ -141,9 +135,7 @@ struct us1800_card {
 
 	/* serialises device (re)configuration against stop_work */
 	struct mutex cfg_mutex;
-	/* device received STREAM_STOP and needs a full configure before use */
 	bool stream_stopped;
-	/* a stream broke (URB died / too many errors): full re-init needed */
 	atomic_t needs_reinit;
 	unsigned int reinit_failures;
 	atomic_t pb_errors;

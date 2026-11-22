@@ -16,6 +16,7 @@ void playback_urb_complete(struct urb *urb);
 void feedback_urb_complete(struct urb *urb);
 void capture_urb_complete(struct urb *urb);
 int us1800_configure_device_for_rate(struct us1800_card *us1800, int rate);
+int us1800_configure_device(struct us1800_card *us1800, int rate, bool reinit);
 void us1800_stop_pcm_work_handler(struct work_struct *work);
 int us1800_pcm_hw_params(struct snd_pcm_substream *substream,
 						 struct snd_pcm_hw_params *params);
