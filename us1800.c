@@ -30,6 +30,7 @@ void us1800_free_urbs(struct us1800_card *us1800)
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	usb_kill_anchored_urbs(&us1800->midi_anchor);
 
 	for (i = 0; i < NUM_PLAYBACK_URBS; i++) {
 		if (us1800->playback_urbs[i]) {
@@ -59,6 +60,21 @@ void us1800_free_urbs(struct us1800_card *us1800)
 			usb_free_urb(us1800->capture_urbs[i]);
 			us1800->capture_urbs[i] = NULL;
 		}
+	}
+
+	if (us1800->midi_out_urb) {
+		usb_free_coherent(us1800->dev, MIDI_PACKET_SIZE,
+						  us1800->midi_out_buf,
+					us1800->midi_out_urb->transfer_dma);
+		usb_free_urb(us1800->midi_out_urb);
+		us1800->midi_out_urb = NULL;
+	}
+	if (us1800->midi_in_urb) {
+		usb_free_coherent(us1800->dev, MIDI_PACKET_SIZE,
+						  us1800->midi_in_buf,
+					us1800->midi_in_urb->transfer_dma);
+		usb_free_urb(us1800->midi_in_urb);
+		us1800->midi_in_urb = NULL;
 	}
 }
 
@@ -270,6 +286,7 @@ static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *
 	init_usb_anchor(&us1800->playback_anchor);
 	init_usb_anchor(&us1800->feedback_anchor);
 	init_usb_anchor(&us1800->capture_anchor);
+	init_usb_anchor(&us1800->midi_anchor);
 
 	INIT_WORK(&us1800->stop_work, us1800_stop_work_handler);
 	INIT_WORK(&us1800->stop_pcm_work, us1800_stop_pcm_work_handler);
@@ -289,6 +306,10 @@ static int us1800_probe(struct usb_interface *intf, const struct usb_device_id *
 	snd_pcm_set_ops(us1800->pcm, SNDRV_PCM_STREAM_PLAYBACK, &us1800_playback_ops);
 	snd_pcm_set_ops(us1800->pcm, SNDRV_PCM_STREAM_CAPTURE, &us1800_capture_ops);
 	snd_pcm_set_managed_buffer_all(us1800->pcm, SNDRV_DMA_TYPE_VMALLOC, NULL, 0, 0);
+
+	err = us1800_create_midi(us1800);
+	if (err < 0)
+		goto free_card;
 
 	us1800->scratch_buf = devm_kzalloc(&dev->dev, 16, GFP_KERNEL);
 	if (!us1800->scratch_buf) {
@@ -370,6 +391,7 @@ static void us1800_disconnect(struct usb_interface *intf)
 		usb_kill_anchored_urbs(&us1800->playback_anchor);
 		usb_kill_anchored_urbs(&us1800->feedback_anchor);
 		usb_kill_anchored_urbs(&us1800->capture_anchor);
+		usb_kill_anchored_urbs(&us1800->midi_anchor);
 
 		snd_card_disconnect(us1800->card);
 		cancel_work_sync(&us1800->stop_work);
@@ -394,6 +416,7 @@ static int us1800_suspend(struct usb_interface *intf, pm_message_t message)
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	usb_kill_anchored_urbs(&us1800->midi_anchor);
 
 	usb_control_msg(us1800->dev, usb_sndctrlpipe(us1800->dev, 0),
 					VENDOR_REQ_POWER_CONTROL, RT_H2D_VENDOR_DEV,
@@ -460,6 +483,7 @@ static int us1800_pre_reset(struct usb_interface *intf)
 	usb_kill_anchored_urbs(&us1800->playback_anchor);
 	usb_kill_anchored_urbs(&us1800->feedback_anchor);
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	usb_kill_anchored_urbs(&us1800->midi_anchor);
 	mutex_unlock(&us1800->cfg_mutex);
 	return 0;
 }

@@ -12,6 +12,7 @@
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
+#include <sound/rawmidi.h>
 
 #define DRIVER_NAME "us1800"
 
@@ -75,6 +76,9 @@ enum tascam_register {
 #define NUM_CAPTURE_URBS 8
 #define CAPTURE_PACKET_SIZE 4096
 
+#define MIDI_PACKET_SIZE 9
+#define MIDI_PAYLOAD_SIZE 8
+
 #define BYTES_PER_SAMPLE 3
 #define PLAYBACK_CHANNELS 4
 #define CAPTURE_CHANNELS 16
@@ -96,6 +100,7 @@ struct us1800_card {
 	struct usb_interface *iface0;
 	struct snd_card *card;
 	struct snd_pcm *pcm;
+	struct snd_rawmidi *rmidi;
 
 	u8 *scratch_buf;
 
@@ -111,6 +116,17 @@ struct us1800_card {
 	struct usb_anchor playback_anchor;
 	struct usb_anchor feedback_anchor;
 	struct usb_anchor capture_anchor;
+
+	struct snd_rawmidi_substream *midi_input;
+	struct snd_rawmidi_substream *midi_output;
+	struct urb *midi_in_urb;
+	struct urb *midi_out_urb;
+	u8 *midi_in_buf;
+	u8 *midi_out_buf;
+	struct usb_anchor midi_anchor;
+	bool midi_out_active;
+	atomic_t midi_out_in_flight;
+	spinlock_t midi_lock;
 
 	spinlock_t lock;
 	atomic_t playback_active;
@@ -159,5 +175,7 @@ static inline bool us1800_urb_fatal(int status)
 }
 
 #include "us1800_pcm.h"
+
+int us1800_create_midi(struct us1800_card *us1800);
 
 #endif /* __US1800_H */

@@ -5,9 +5,11 @@
 ### Implemented Features
 *   **Audio Playback:**
 *   **Audio Capture (Recording):** 
+*   **MIDI IN/OUT:**
 
 ### To-Do & Known Limitations
-* Implement MIDI IN/OUT(TBD) 
+*   **MIDI requires active audio streams.** MIDI only works while playback or capture is running (for example under JACK, where streams stay active). In non-active scenarios it does not work.
+*   Further issues can be reported via user feedback (see Reporting Issues below).
 
 ## Installation and Usage
 
