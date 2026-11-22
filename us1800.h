@@ -8,6 +8,7 @@
 #include <linux/usb.h>
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
+#include <linux/mutex.h>
 #include <sound/core.h>
 #include <sound/initval.h>
 #include <sound/pcm.h>
@@ -87,6 +88,9 @@ enum tascam_register {
 
 #define USB_CTRL_TIMEOUT_MS 1000
 
+#define US1800_MAX_CONSEC_ERRORS 40
+#define US1800_MAX_REINIT_FAILURES 3
+
 struct us1800_card {
 	struct usb_device *dev;
 	struct usb_interface *iface0;
@@ -129,6 +133,15 @@ struct us1800_card {
 
 	bool rate_changing;
 
+	/* serialises device (re)configuration against stop_work */
+	struct mutex cfg_mutex;
+	bool stream_stopped;
+	atomic_t needs_reinit;
+	unsigned int reinit_failures;
+	atomic_t pb_errors;
+	atomic_t fb_errors;
+	atomic_t cap_errors;
+
 	struct work_struct stop_work;
 	struct work_struct stop_pcm_work;
 };
@@ -136,6 +149,14 @@ struct us1800_card {
 void us1800_free_urbs(struct us1800_card *us1800);
 int us1800_alloc_urbs(struct us1800_card *us1800);
 void us1800_stop_work_handler(struct work_struct *work);
+void us1800_stream_broken(struct us1800_card *us1800, const char *why);
+int us1800_prepare_device(struct us1800_card *us1800);
+
+static inline bool us1800_urb_fatal(int status)
+{
+	return status == -ENOENT || status == -ECONNRESET ||
+	       status == -ESHUTDOWN || status == -ENODEV;
+}
 
 #include "us1800_pcm.h"
 

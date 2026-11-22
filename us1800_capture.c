@@ -51,8 +51,14 @@ static int us1800_capture_close(struct snd_pcm_substream *substream)
 static int us1800_capture_prepare(struct snd_pcm_substream *substream)
 {
 	struct us1800_card *us1800 = snd_pcm_substream_chip(substream);
+	int err;
+
+	err = us1800_prepare_device(us1800);
+	if (err < 0)
+		return err;
 
 	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	atomic_set(&us1800->cap_errors, 0);
 
 	us1800->driver_capture_pos = 0;
 	us1800->capture_frames_processed = 0;
@@ -117,9 +123,9 @@ static int us1800_capture_trigger(struct snd_pcm_substream *substream, int cmd)
 				usb_unlink_urb(us1800->capture_urbs[i]);
 		}
 
-		if (!atomic_read(&us1800->playback_active)) {
+		if (cmd == SNDRV_PCM_TRIGGER_STOP &&
+		    !atomic_read(&us1800->playback_active))
 			schedule_work(&us1800->stop_work);
-		}
 	}
 
 	if (start) {
@@ -190,7 +196,7 @@ void capture_urb_complete(struct urb *urb)
 	struct snd_pcm_substream *substream;
 	struct snd_pcm_runtime *runtime;
 	unsigned long flags;
-	int frames_received;
+	int frames_received, err;
 	snd_pcm_uframes_t write_pos;
 	snd_pcm_uframes_t buffer_size, period_size;
 	bool need_period_elapsed = false;
@@ -204,11 +210,22 @@ void capture_urb_complete(struct urb *urb)
 		return;
 	}
 
-	if (urb->status) {
+	if (us1800_urb_fatal(urb->status) || !atomic_read(&us1800->capture_active)) {
 		usb_unanchor_urb(urb);
 		atomic_dec(&us1800->active_urbs);
 		return;
 	}
+
+	if (urb->status) {
+		if (atomic_inc_return(&us1800->cap_errors) > US1800_MAX_CONSEC_ERRORS) {
+			us1800_stream_broken(us1800, "capture errors");
+			usb_unanchor_urb(urb);
+			atomic_dec(&us1800->active_urbs);
+			return;
+		}
+		goto resubmit;
+	}
+	atomic_set(&us1800->cap_errors, 0);
 
 	substream = us1800->capture_substream;
 	if (!substream || !substream->runtime) {
@@ -272,10 +289,20 @@ void capture_urb_complete(struct urb *urb)
 			snd_pcm_period_elapsed(substream);
 	}
 
-	usb_anchor_urb(urb, &us1800->capture_anchor);
-	if (usb_submit_urb(urb, GFP_ATOMIC) < 0) {
+resubmit:
+	if (!atomic_read(&us1800->capture_active)) {
 		usb_unanchor_urb(urb);
 		atomic_dec(&us1800->active_urbs);
+		return;
+	}
+
+	usb_anchor_urb(urb, &us1800->capture_anchor);
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err < 0) {
+		usb_unanchor_urb(urb);
+		atomic_dec(&us1800->active_urbs);
+		if (!us1800_urb_fatal(err))
+			us1800_stream_broken(us1800, "capture resubmit failed");
 		return;
 	}
 }

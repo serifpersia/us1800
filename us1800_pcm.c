@@ -113,6 +113,25 @@ int us1800_configure_device_for_rate(struct us1800_card *us1800, int rate)
 	return err;
 }
 
+int us1800_configure_device(struct us1800_card *us1800, int rate, bool reinit)
+{
+	int err;
+
+	usb_kill_anchored_urbs(&us1800->playback_anchor);
+	usb_kill_anchored_urbs(&us1800->feedback_anchor);
+	usb_kill_anchored_urbs(&us1800->capture_anchor);
+
+	if (reinit) {
+		err = usb_set_interface(us1800->dev, 0, 1);
+		if (!err)
+			err = usb_set_interface(us1800->dev, 1, 1);
+		if (err < 0)
+			return err;
+	}
+
+	return us1800_configure_device_for_rate(us1800, rate);
+}
+
 int us1800_pcm_hw_params(struct snd_pcm_substream *substream,
 						 struct snd_pcm_hw_params *params)
 {
@@ -136,13 +155,17 @@ int us1800_pcm_hw_params(struct snd_pcm_substream *substream,
 	us1800->rate_changing = true;
 	spin_unlock_irqrestore(&us1800->lock, flags);
 
-	usb_kill_anchored_urbs(&us1800->playback_anchor);
-	usb_kill_anchored_urbs(&us1800->feedback_anchor);
-	usb_kill_anchored_urbs(&us1800->capture_anchor);
+	flush_work(&us1800->stop_work);
+	mutex_lock(&us1800->cfg_mutex);
 
+	err = us1800_configure_device(us1800, rate,
+				      atomic_read(&us1800->needs_reinit));
 	atomic_set(&us1800->active_urbs, 0);
-
-	err = us1800_configure_device_for_rate(us1800, rate);
+	if (!err) {
+		us1800->stream_stopped = false;
+		atomic_set(&us1800->needs_reinit, 0);
+	}
+	mutex_unlock(&us1800->cfg_mutex);
 
 	spin_lock_irqsave(&us1800->lock, flags);
 	us1800->rate_changing = false;
@@ -163,7 +186,7 @@ void us1800_stop_pcm_work_handler(struct work_struct *work)
 		return;
 
 	if (us1800->playback_substream)
-		snd_pcm_stop(us1800->playback_substream, SNDRV_PCM_STATE_XRUN);
+		snd_pcm_stop_xrun(us1800->playback_substream);
 	if (us1800->capture_substream)
-		snd_pcm_stop(us1800->capture_substream, SNDRV_PCM_STATE_XRUN);
+		snd_pcm_stop_xrun(us1800->capture_substream);
 }
